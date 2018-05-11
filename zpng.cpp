@@ -57,6 +57,36 @@ struct ZPNG_Header
     uint8_t BytesPerChannel;
 };
 
+class ByteBuffer
+{
+public:
+	ByteBuffer(size_t size)
+	{
+		Buffer = (uint8_t*) calloc(1, size);
+	}
+	
+	~ByteBuffer()
+	{
+		free(Buffer);
+		Buffer = 0;
+	}
+	
+	uint8_t* TransferOwnership()
+	{
+		uint8_t* buf = Buffer;
+		Buffer = 0;
+		return buf;
+	}
+	
+	operator uint8_t* ()
+	{
+		return Buffer;
+	}
+
+private:
+	uint8_t* Buffer;
+};
+
 
 //------------------------------------------------------------------------------
 // Image Processing
@@ -65,7 +95,7 @@ struct ZPNG_Header
 // Splitting the data into blocks of 4 at a time actually reduces compression.
 
 template<int kChannels>
-static void PackAndFilter(
+void PackAndFilter(
     const ZPNG_ImageData* imageData,
     uint8_t* output
 )
@@ -97,7 +127,7 @@ static void PackAndFilter(
 }
 
 template<int kChannels>
-static void UnpackAndUnfilter(
+void UnpackAndUnfilter(
     const uint8_t* input,
     ZPNG_ImageData* imageData
 )
@@ -366,9 +396,6 @@ ZPNG_Buffer ZPNG_Compress(
     const ZPNG_ImageData* imageData
 )
 {
-    uint8_t* packing = nullptr;
-    uint8_t* output = nullptr;
-
     ZPNG_Buffer bufferOutput;
     bufferOutput.Data = nullptr;
     bufferOutput.Bytes = 0;
@@ -383,24 +410,19 @@ ZPNG_Buffer ZPNG_Compress(
     }
 
     // Space for packing
-    packing = (uint8_t*)calloc(1, byteCount);
+	ByteBuffer packing(byteCount);
 
     if (!packing) {
-ReturnResult:
-        if (bufferOutput.Data != output) {
-            free(output);
-        }
-        free(packing);
-        return bufferOutput;
+		return bufferOutput;
     }
 
     const unsigned maxOutputBytes = (unsigned)ZSTD_compressBound(byteCount);
 
     // Space for output
-    output = (uint8_t*)calloc(1, ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes);
+	ByteBuffer output(ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes);
 
     if (!output) {
-        goto ReturnResult;
+		return bufferOutput;
     }
 
     // Pass 1: Pack and filter data.
@@ -443,31 +465,28 @@ ReturnResult:
         kCompressionLevel);
 
     if (ZSTD_isError(result)) {
-        goto ReturnResult;
+		return bufferOutput;
     }
 
     // Write header
 
-    ZPNG_Header* header = (ZPNG_Header*)output;
+    ZPNG_Header* header = (ZPNG_Header*)(uint8_t*)output;
     header->Magic = ZPNG_HEADER_MAGIC;
     header->Width = (uint16_t)imageData->WidthPixels;
     header->Height = (uint16_t)imageData->HeightPixels;
     header->Channels = (uint8_t)imageData->Channels;
     header->BytesPerChannel = (uint8_t)imageData->BytesPerChannel;
 
-    bufferOutput.Data = output;
+    bufferOutput.Data = output.TransferOwnership();
     bufferOutput.Bytes = ZPNG_HEADER_OVERHEAD_BYTES + (unsigned)result;
 
-    goto ReturnResult;
+    return bufferOutput;
 }
 
 ZPNG_ImageData ZPNG_Decompress(
     ZPNG_Buffer buffer
 )
 {
-    uint8_t* packing = nullptr;
-    uint8_t* output = nullptr;
-
     ZPNG_ImageData imageData;
     imageData.Buffer.Data = nullptr;
     imageData.Buffer.Bytes = 0;
@@ -478,17 +497,12 @@ ZPNG_ImageData ZPNG_Decompress(
     imageData.WidthPixels = 0;
 
     if (!buffer.Data || buffer.Bytes < ZPNG_HEADER_OVERHEAD_BYTES) {
-ReturnResult:
-        if (imageData.Buffer.Data != output) {
-            free(output);
-        }
-        free(packing);
-        return imageData;
+		return imageData;
     }
 
     const ZPNG_Header* header = (const ZPNG_Header*)buffer.Data;
     if (header->Magic != ZPNG_HEADER_MAGIC) {
-        goto ReturnResult;
+		return imageData;
     }
 
     imageData.WidthPixels = header->Width;
@@ -502,10 +516,10 @@ ReturnResult:
     const unsigned byteCount = pixelBytes * pixelCount;
 
     // Space for packing
-    packing = (uint8_t*)calloc(1, byteCount);
+    ByteBuffer packing(byteCount);
 
     if (!packing) {
-        goto ReturnResult;
+		return imageData;
     }
 
     // Stage 1: Decompress back to packing buffer
@@ -517,19 +531,19 @@ ReturnResult:
         buffer.Bytes - ZPNG_HEADER_OVERHEAD_BYTES);
 
     if (ZSTD_isError(result)) {
-        goto ReturnResult;
+		return imageData;
     }
 
     // Stage 2: Unpack/Unfilter
 
     // Space for output
-    output = (uint8_t*)calloc(1, byteCount);
+    ByteBuffer output(byteCount);
 
     if (!output) {
-        goto ReturnResult;
+		return imageData;
     }
 
-    imageData.Buffer.Data = output;
+    imageData.Buffer.Data = output.TransferOwnership();
     imageData.Buffer.Bytes = byteCount;
 
     switch (pixelBytes)
@@ -560,7 +574,7 @@ ReturnResult:
         break;
     }
 
-    goto ReturnResult;
+    return imageData;
 }
 
 void ZPNG_Free(
